@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 #define GIF_HEADER_SIZE 408
 #define SUB_BLOCK_SIZE 127
@@ -13,10 +14,13 @@
 #define SIZE_IND1 6
 #define SIZE_IND2 402
 
+// value for padding file length
+#define PAD_VAL 0x1a
+
 // header for the gif file
 // bytes with value 0x11 will be overwritten with the amount of data needed
 unsigned char gif_header[] = {
-  0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x11, 0x11, 0x01, 0x00, 0xf6, 0x00,
+  0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x11, 0x11, 0x11, 0x11, 0xf6, 0x00,
   0x00, 0x08, 0x6b, 0x52, 0x08, 0x6b, 0x5a, 0x10, 0x6b, 0x5a, 0x10, 0x73,
   0x5a, 0x10, 0x73, 0x63, 0x18, 0x73, 0x63, 0x18, 0x7b, 0x63, 0x21, 0x7b,
   0x6b, 0x29, 0x7b, 0x6b, 0x29, 0x84, 0x73, 0x52, 0xad, 0x9c, 0x5a, 0xb5,
@@ -49,7 +53,7 @@ unsigned char gif_header[] = {
   0xbd, 0xf7, 0xe7, 0xce, 0xff, 0x6b, 0x9c, 0xff, 0xad, 0x6b, 0xff, 0xb5,
   0x6b, 0xff, 0xb5, 0x73, 0xff, 0xd6, 0xde, 0xff, 0xef, 0xe7, 0xff, 0xff,
   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-  0xff, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x11, 0x11, 0x01, 0x00, 0x00, 0x07
+  0xff, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x00, 0x07
 };
 
 // first value needs to be replaced with correct length
@@ -74,17 +78,24 @@ int main(int argc, char **argv) {
 		num_sub_blocks = 1 + size / SUB_BLOCK_USEABLE;
 	}
 
+	// determine proper gif size (gif is square)
+	int side_length = 1 + ((int) sqrt((double) size));
+
 	// set gif_header accordingly
-	gif_header[SIZE_IND1] = size % 256;
-	gif_header[SIZE_IND1 + 1] = size / 256;
-	gif_header[SIZE_IND2] = size % 256;
-	gif_header[SIZE_IND2 + 1] = size / 256;
+	gif_header[SIZE_IND1] = side_length % 256;
+	gif_header[SIZE_IND1 + 1] = side_length / 256;
+	gif_header[SIZE_IND1 + 2] = side_length % 256;
+	gif_header[SIZE_IND1 + 3] = side_length / 256;
+	gif_header[SIZE_IND2] = side_length % 256;
+	gif_header[SIZE_IND2 + 1] = side_length / 256;
+	gif_header[SIZE_IND2 + 2] = side_length % 256;
+	gif_header[SIZE_IND2 + 3] = side_length / 256;
 
 	// write to output file (second argument)
 	FILE *output = fopen(argv[2], "wb");
 	unsigned char *buffer = malloc(SUB_BLOCK_USEABLE);
 	fwrite(&gif_header, 1, GIF_HEADER_SIZE, output);
-	int bytes_read;
+	int bytes_read, total_bytes_written = 0;
 	for (int i=0; i<num_sub_blocks; i++) {
 		bytes_read = fread(buffer, 1, SUB_BLOCK_USEABLE, input);
 
@@ -96,7 +107,22 @@ int main(int argc, char **argv) {
 		gif_sub_block_header[0] = bytes_read + 1;
 		fwrite(&gif_sub_block_header, 1, 2, output);
 		fwrite(buffer, 1, bytes_read, output);
+		total_bytes_written += bytes_read;
 	}
+
+	// pad the result
+	int bytes_needed = side_length * side_length - total_bytes_written, bytes_for_sub_block;
+	while (bytes_needed) {
+		bytes_for_sub_block = bytes_needed >= SUB_BLOCK_USEABLE ? SUB_BLOCK_USEABLE : bytes_needed;
+		fputc(bytes_for_sub_block + 1, output);
+		fputc(0x80, output);
+		for (int j=0; j<bytes_for_sub_block; j++){
+			fputc(PAD_VAL, output);
+		}
+		bytes_needed -= bytes_for_sub_block;
+	}
+
+	// write trailer to gif
 	fwrite(&gif_trailer, 1, GIF_TRAILER_SIZE, output);
 
 	fclose(input);
