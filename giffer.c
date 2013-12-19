@@ -4,18 +4,22 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include "encoding.h"
 
 #define GIF_HEADER_SIZE 408
-#define SUB_BLOCK_SIZE 127
-#define SUB_BLOCK_USEABLE 125
+#define SUB_BLOCK_SIZE 114
+#define SUB_BLOCK_USEABLE 112
+#define SUB_BLOCK_USEABLE_DECODED 98
+#define MAX_SUB_BLOCK_USEABLE_DECODED 105 // used in case padding is necessary
 #define GIF_TRAILER_SIZE 4
 
 // indices in gif_header of size data
 #define SIZE_IND1 6
 #define SIZE_IND2 402
 
-// value for padding file length
-#define PAD_VAL 0x1a
+// value to indicate beginning of file padding
+#define PAD_HEADER_SIZE 7
+unsigned char pad_header[] = { 0xde, 0xad, 0xbe, 0xef, 0xa5, 0x5e, 0x55 };
 
 // header for the gif file
 // bytes with value 0x11 will be overwritten with the amount of data needed
@@ -70,16 +74,13 @@ int main(int argc, char **argv) {
 	int size = ftell(input);
 	fseek(input, 0, SEEK_SET);
 
-	// calculate number of sub-blocks needed
-	int num_sub_blocks;
-	if (size % SUB_BLOCK_USEABLE == 0) {
-		num_sub_blocks = size / SUB_BLOCK_USEABLE;
-	} else {
-		num_sub_blocks = 1 + size / SUB_BLOCK_USEABLE;
-	}
+	// modify size to account for encoding
+	// +2 rather than +1 accounts for padding
+	size = 8 * (size / 7 + 2);
 
-	// determine proper gif size (gif is square)
-	int side_length = 1 + ((int) sqrt((double) size));
+	// find smallest square that can contain the file
+	// here the square is side_length^2
+	int side_length = 1 + (int) sqrt((double) size);
 
 	// set gif_header accordingly
 	gif_header[SIZE_IND1] = side_length % 256;
@@ -93,33 +94,56 @@ int main(int argc, char **argv) {
 
 	// write to output file (second argument)
 	FILE *output = fopen(argv[2], "wb");
-	unsigned char *buffer = malloc(SUB_BLOCK_USEABLE);
-	fwrite(&gif_header, 1, GIF_HEADER_SIZE, output);
-	int bytes_read, total_bytes_written = 0;
-	for (int i=0; i<num_sub_blocks; i++) {
-		bytes_read = fread(buffer, 1, SUB_BLOCK_USEABLE, input);
+	unsigned char *input_buffer = malloc(MAX_SUB_BLOCK_USEABLE_DECODED), *output_buffer;
 
-		for (int j=0; j<bytes_read; j++) {
-			if (buffer[j] >= 0x80)
-				printf("%x\n", buffer[j]);
+	// write header
+	fwrite(&gif_header, 1, GIF_HEADER_SIZE, output);
+
+	// copy data from input file
+	int bytes_read, bytes_written, total_bytes_written = 0;
+	while ( (bytes_read = fread(input_buffer, 1, SUB_BLOCK_USEABLE_DECODED, input)) ) {
+		// handle case where we've reached end of file and the file length is not divisible by 7
+		if (bytes_read % 7 != 0) {
+			for (int i=0; i<PAD_HEADER_SIZE; i++) {
+				input_buffer[bytes_read + i] = pad_header[i];
+			}
+			bytes_read += PAD_HEADER_SIZE;
+			while (bytes_read % 7 != 0) {
+				input_buffer[bytes_read++] = 0x00;
+			}
 		}
 
-		gif_sub_block_header[0] = bytes_read + 1;
+		// encode data from input file
+		output_buffer = encode(bytes_read, input_buffer);
+		bytes_written = 8 * bytes_read / 7;
+
+		// write sub-block header
+		gif_sub_block_header[0] = bytes_written + 1;
 		fwrite(&gif_sub_block_header, 1, 2, output);
-		fwrite(buffer, 1, bytes_read, output);
-		total_bytes_written += bytes_read;
+
+		// write result to output file
+		fwrite(output_buffer, 1, bytes_written, output);
+		total_bytes_written += bytes_written;
 	}
 
 	// pad the result
-	int bytes_needed = side_length * side_length - total_bytes_written, bytes_for_sub_block;
+	// include pad_header in case it hasn't already been
+	output_buffer = encode(PAD_HEADER_SIZE, pad_header);
+	bytes_written = 8 * PAD_HEADER_SIZE / 7;
+	gif_sub_block_header[0] = bytes_written + 1;
+	fwrite(&gif_sub_block_header, 1, 2, output);
+	fwrite(output_buffer, 1, bytes_written, output);
+	total_bytes_written += bytes_written;
+	// pad the rest
+	int bytes_needed = side_length * side_length - total_bytes_written;
 	while (bytes_needed) {
-		bytes_for_sub_block = bytes_needed >= SUB_BLOCK_USEABLE ? SUB_BLOCK_USEABLE : bytes_needed;
-		fputc(bytes_for_sub_block + 1, output);
-		fputc(0x80, output);
-		for (int j=0; j<bytes_for_sub_block; j++){
-			fputc(PAD_VAL, output);
+		bytes_written = bytes_needed >= SUB_BLOCK_USEABLE ? SUB_BLOCK_USEABLE : bytes_needed;
+		gif_sub_block_header[0] = bytes_written + 1;
+		fwrite(&gif_sub_block_header, 1, 2, output);
+		for (int j=0; j<bytes_written; j++){
+			fputc(0x00, output);
 		}
-		bytes_needed -= bytes_for_sub_block;
+		bytes_needed -= bytes_written;
 	}
 
 	// write trailer to gif
@@ -129,4 +153,4 @@ int main(int argc, char **argv) {
 	fclose(output);
 	exit(0);
 }
-			
+
